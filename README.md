@@ -1,4 +1,3 @@
-
 # Transfer and Alignment Network (TAN)
 Data and code for paper titled [Transfer and Alignment Network for Generalized Category Discovery](https://arxiv.org/abs/2312.16467) (AAAI 2024 paper)
 
