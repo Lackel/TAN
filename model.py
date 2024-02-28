@@ -43,7 +43,7 @@ class PretrainModelManager:
             {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
         ]
         optimizer = BertAdam(optimizer_grouped_parameters,
-                         lr = args.lr,
+                         lr = args.lr_pre,
                          warmup = args.warmup_proportion,
                          t_total = self.num_train_steps)   
         return optimizer

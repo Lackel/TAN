@@ -5,7 +5,7 @@ from model import BertForModel, PretrainModelManager
 import numpy as np
 import torch.nn.functional as F
 from util import clustering_score
-from torch.utils.data import DataLoader, SequentialSampler, TensorDataset, RandomSampler
+from torch.utils.data import DataLoader, SequentialSampler, TensorDataset
 import torch
 from sklearn.cluster import KMeans
 from transformers import logging, AutoTokenizer, WEIGHTS_NAME
@@ -15,6 +15,7 @@ import math
 import warnings
 from scipy.special import softmax
 
+
 class ModelManager:
     def __init__(self, args, data, pretrained_model=None):
         self.set_seed(args.seed)
@@ -23,15 +24,15 @@ class ModelManager:
             if os.path.exists(args.pretrain_dir):
                 pretrained_model = self.restore_model(args, pretrained_model)
         self.pretrained_model = pretrained_model
-        self.labelMap = None
-        
-        self.seed = args.seed         
+        # print(data.known_lab)
+        self.seed = args.seed  
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.num_known = data.num_known
         if args.cluster_num_factor > 1:
             self.num_labels = self.predict_k(args, data) 
         else:
-            self.num_labels = data.num_labels
+            self.num_labels = data.num_labels       
+
         self.model = BertForModel(args, self.num_labels)
         
         self.load_pretrained_model()
@@ -40,13 +41,13 @@ class ModelManager:
             self.freeze_parameters(self.model)
             
         self.model.to(self.device)
-        
         self.data = data
         num_train_examples = 2 * len(data.train_labeled_examples) + 2 * len(data.train_unlabeled_examples)
         self.num_training_steps = math.ceil(num_train_examples / args.train_batch_size) * 100
         self.num_warmup_steps= int(args.warmup_proportion * self.num_training_steps) 
         self.optimizer = self.get_optimizer(args)
         self.tokenizer = AutoTokenizer.from_pretrained(args.bert_model, do_lower_case=True)
+        self.proto_calibration = None
         
     def set_seed(self, seed):
         torch.manual_seed(seed)
@@ -99,16 +100,24 @@ class ModelManager:
     def train(self, args, data):
         labelediter = iter(self.data.train_labeled_dataloader)
         train_dataloader, proto_label, proto_calibration, maps = self.calibration(data, args)
+        self.proto_label = proto_label
+        self.proto_calibration = proto_calibration
     
         for epoch in range(1, int(args.num_train_epochs)+1, 1):
+            feats_label, labels = self.get_features_labels(data.train_labeled_dataloader, self.model, args)
+            for i in range(self.num_known):
+                t_datas = feats_label[labels == i, :]
+                proto_label[i] =  torch.mean(t_datas, axis=0)
+
+            self.proto_label = proto_label
+
             tr_loss = 0
             nb_tr_examples, nb_tr_steps = 0, 0
             self.model.train()   
-
             for _, batch in enumerate(train_dataloader):
                 batch = tuple(t.to(self.device) for t in batch)
                 input_ids, input_mask, segment_ids, label_ids = batch
-                
+
                 # generate augmented instance.
                 input_ids1 = self.random_token_replace(input_ids.cpu(), self.tokenizer).to(self.device)
                 pooled1 = self.model(input_ids1, segment_ids, input_mask, label_ids, mode='feature_extract')
@@ -119,16 +128,17 @@ class ModelManager:
                 # instance-to-instance alignment loss.
                 pooled_cont = torch.cat([F.normalize(pooled, dim=1), F.normalize(pooled1, dim=1)], dim=0)
                 loss_i2i = self.model.simcse_loss(pooled_cont)
-
+                
                 # instance-to-prototype alignment loss.
-                cost_mat = self.EuclideanDistances(pooled, proto_calibration)
+                cost_mat = self.EuclideanDistances(pooled, self.proto_calibration)
                 mask = torch.zeros_like(cost_mat)
                 for i in range(cost_mat.shape[0]):
                     mask[i][label_ids[i]] = 1
                 loss_i2p = (cost_mat * mask).sum(1).mean()
 
+
                 # prototype-to-instance transfer loss.
-                cost_mat = self.EuclideanDistances(pooled, proto_label)
+                cost_mat = self.EuclideanDistances(pooled, self.proto_label)
                 mask = torch.zeros_like(cost_mat)
                 list_known = torch.tensor(list(maps.keys())).to(self.device)
                 for i in range(cost_mat.shape[0]):
@@ -147,19 +157,14 @@ class ModelManager:
                 input_ids, input_mask, segment_ids, label_ids = batch
                 loss_ce, pooled = self.model(input_ids, segment_ids, input_mask, label_ids, mode='train') 
                 
-                loss = loss_pro + args.gamma * loss_ce
+
+                loss = loss_pro + args.beta * loss_ce
                 loss.backward()
                 tr_loss += loss.item()
                 nb_tr_examples += input_ids.size(0)
                 nb_tr_steps += 1
                 self.optimizer.step()
                 self.optimizer.zero_grad()
-
-            # update labeled prototypes every epoch.
-            feats_label, labels = self.get_features_labels(data.train_labeled_dataloader, self.model, args)
-            for i in range(self.num_known):
-                t_datas = feats_label[labels == i, :]
-                proto_label[i] =  torch.mean(t_datas, axis=0)
             print('Epoch ' + str(epoch) + ' loss:' + str(tr_loss/nb_tr_steps))
               
     def load_pretrained_model(self):
@@ -191,10 +196,11 @@ class ModelManager:
         feats_label, labels = self.get_features_labels(data.train_labeled_dataloader, self.model, args)
         feats_label = feats_label.cpu().numpy()
         labels = labels.cpu().numpy()
-        proto_label = np.zeros((self.num_known, feats_label.shape[-1]))
+        proto_label, vars_label = np.zeros((self.num_known, feats_label.shape[-1])), np.zeros((self.num_known, feats_label.shape[-1]))
         for i in range(self.num_known):
             t_datas = feats_label[labels == i, :]
             proto_label[i] =  np.mean(t_datas, axis=0)
+            vars_label[i] =  np.var(t_datas, axis=0)
 
         feats_unlabel, labels_unlabel = self.get_features_labels(data.train_semi_dataloader, self.model, args)
         print("Performing k-means...")
@@ -202,22 +208,27 @@ class ModelManager:
         labels_unlabel = labels_unlabel.cpu().numpy()
         km = KMeans(n_clusters = self.num_labels, n_init=20, random_state=args.seed).fit(feats_unlabel)
         print("K-means finished")
-
+        
+        # using clustering results as pseudo labels for unlabeled data.
         train_dataloader = self.update_cluster_ids(torch.tensor(km.labels_, dtype=torch.long).to(self.device), args, data)
 
-        means_unlabel = np.zeros((self.num_labels, feats_label.shape[-1]))
+        means_unlabel, vars_unlabel = np.zeros((self.num_labels, feats_label.shape[-1])), np.zeros((self.num_labels, feats_label.shape[-1]))
         for i in range(self.num_labels):
             t_datas = feats_unlabel[km.labels_ == i, :]
             means_unlabel[i] = np.mean(t_datas, axis=0)
+            vars_unlabel[i] = np.var(t_datas, axis=0)
 
         dist_matrix = np.zeros((self.num_labels, self.num_known))
         for i in range(self.num_labels):
             for j in range(self.num_known):
                 dist_matrix[i, j] = -(np.linalg.norm(means_unlabel[i] - proto_label[j])) / (feats_unlabel.shape[-1] ** (1/2))
+                # wasser_matrix[i, j] = -(Wasserstein(means_unlabel[i], vars_unlabel[i], proto_label[j], vars_label[j])) / (feats_unlabel.shape[-1] ** (1/2))
             index = dist_matrix[i].argsort()[0:self.num_known-args.topk]
             dist_matrix[i][index] = -1e9
             dist_matrix[i] = softmax(dist_matrix[i])
+
         proto_calibration = args.alpha * means_unlabel + (1 - args.alpha) * dist_matrix.dot(proto_label)
+
 
         proto_label = torch.tensor(proto_label).float().to(self.device)
         proto_calibration = torch.tensor(proto_calibration).float().to(self.device)
@@ -225,7 +236,8 @@ class ModelManager:
         # index map between labeled and unlabeled prototypes
         temp = dist_matrix.T
         index = np.argmax(temp, axis=-1)
-        # getting cluster ids corresponding to known categories
+
+        # getting unlabeled prototype ids that correspond to known categories.
         maps = {index[i]:i for i in range(self.num_known)}
         
         return train_dataloader, proto_label, proto_calibration, maps
@@ -295,11 +307,13 @@ if __name__ == '__main__':
     warnings.filterwarnings('ignore')
     logging.set_verbosity_error()
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
     print('Data and Parameters Initialization...')
     parser = init_model()
     args = parser.parse_args()
     data = Data(args)
-    
+    os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu_id
+
     if args.pretrain:
         print('Pre-training begin...')
         manager_p = PretrainModelManager(args, data)
@@ -310,15 +324,11 @@ if __name__ == '__main__':
         manager = ModelManager(args, data, None)
     
     print('Training begin...')
-    manager.evaluation(args, data)
-    manager.train(args, data)
+    manager.train(args,data)
     print('Training finished!')
 
     
     print('Evaluation begin...')
     manager.evaluation(args, data)
-    # You can run evaluation multiple times to eliminate the effects of clustering randomness.
-    # manager.evaluation(args, data)
-    # manager.evaluation(args, data)
     print('Evaluation finished!')
 

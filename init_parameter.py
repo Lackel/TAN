@@ -28,7 +28,7 @@ def init_model():
     parser.add_argument("--dataset", default=None, type=str, required=True, 
                         help="The name of the dataset to train selected.")
     
-    parser.add_argument("--gamma", default=100, type=float, help="The weighting factor for the cross entropy loss.")
+    parser.add_argument("--beta", default=100, type=float, help="The weighting factor for the cross entropy loss.")
 
     parser.add_argument("--topk", default=5, type=float, help="The number of the selected similar labeled prototypes.")
 
@@ -67,7 +67,7 @@ def init_model():
     parser.add_argument("--num_train_epochs", default=10, type=float,
                         help="The training epochs.")
 
-    parser.add_argument("--lr_pre", default=5e-5, type=float,
+    parser.add_argument("--lr_pre", default=1e-5, type=float,
                         help="The learning rate for pre-training.")
     
     parser.add_argument("--lr", default=1e-5, type=float,
