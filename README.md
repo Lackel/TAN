@@ -17,7 +17,7 @@ Data and code for paper titled [Transfer and Alignment Network for Generalized C
 
 [6. Thanks](#thanks)
 
-[6. Citation](#citation)
+[7. Citation](#citation)
 
 ## Data
 We performed experiments on three public datasets: [clinc](https://aclanthology.org/D19-1131/), [banking](https://aclanthology.org/2020.nlp4convai-1.5/) and [stackoverflow](https://aclanthology.org/W15-1509/), which have been included in our repository in the data folder ' ./data '.
@@ -58,10 +58,13 @@ Some code references the following repositories:
 ## Citation
 If our paper or code is helpful to you, please consider citing our paper:
 ```
-@article{tan,
-  title={Transfer and Alignment Network for Generalized Category Discovery},
+@inproceedings{an2024transfer,
+  title={Transfer and alignment network for generalized category discovery},
   author={An, Wenbin and Tian, Feng and Shi, Wenkai and Chen, Yan and Wu, Yaqiang and Wang, Qianying and Chen, Ping},
-  journal={arXiv preprint arXiv:2312.16467},
-  year={2023}
+  booktitle={Proceedings of the AAAI Conference on Artificial Intelligence},
+  volume={38},
+  number={10},
+  pages={10856--10864},
+  year={2024}
 }
 ```
